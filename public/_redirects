@@ -1,0 +1,2 @@
+/api/*  http://sm-api2.runasp.net/api/:splat  200!
+/*      /index.html                            200
