@@ -4,6 +4,7 @@ import axios from 'axios';
 import Swal from 'sweetalert2';
 
 // Admin Imports
+import SmartLogin from './SmartLogin.jsx';
 import SignIn from './Dashboard/Sign in/Sign in.jsx';
 import CreateAccount from './Dashboard/CreateAccount/CreateAccount.jsx';
 import Dashboard from './Dashboard/DashboardView/Dashboard';
@@ -163,7 +164,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         {/* Admin */}
-        <Route path="/" element={<SignIn />} />
+<Route path="/" element={<SmartLogin />} />
         <Route path="/create-account" element={<CreateAccount />} />
         <Route path="/dashboard" element={<Dashboard units={units} admin={adminUser} />} />
         <Route path="/units" element={<EmergencyUnits units={units} onDelete={deleteUnit} admin={adminUser} />} />
@@ -174,14 +175,14 @@ function App() {
         <Route path="/profile" element={<ProfileSetting admin={adminUser} onUpdate={updateAdmin} onRevoke={revokeSession} />} />
 
         {/* Unit */}
-        <Route path="/unit/login" element={<UnitSignIn />} /> 
+<Route path="/unit/login" element={<SmartLogin />} />
         <Route path="/unit/dashboard" element={<ProtectedUnit><UnitDashboard /></ProtectedUnit>} />
         <Route path="/unit/incident-detail" element={<ProtectedUnit><UnitIncidentDetail /></ProtectedUnit>} />
         <Route path="/unit/incident-detail/:id" element={<ProtectedUnit><UnitIncidentDetail /></ProtectedUnit>} />
         <Route path="/unit/settings" element={<ProtectedUnit><UnitSettings /></ProtectedUnit>} />
         <Route path="/unit/profile" element={<ProfilePage />} />
 
-<Route path="/bin/login" element={<BinSignIn />} />
+<Route path="/bin/login" element={<SmartLogin />} />
 
 {/* Bin Collector Dashboard */}
 <Route path="/bin" element={<ProtectedBin><BinLayout /></ProtectedBin>}>
