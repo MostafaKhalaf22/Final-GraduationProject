@@ -1,11 +1,10 @@
-import React, { useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import Swal from 'sweetalert2'; 
-import axios from 'axios'; 
 import { 
-  LayoutGrid, Truck, Activity, Map as MapIcon, 
-  Users, Settings, Bell, Mail, LogOut, ChevronDown, 
-  Search, Plus, Eye, Pencil, Trash2, Moon, ShieldCheck, Plane
+  LayoutGrid, Truck, Users, Settings, Bell, Mail, LogOut, ChevronDown, 
+  Search, Plus, Eye, Pencil, Trash2, Moon, ShieldCheck, RefreshCw
 } from 'lucide-react';
 
 const formatLastActive = (dateString) => {
@@ -14,7 +13,6 @@ const formatLastActive = (dateString) => {
   if (isNaN(date.getTime())) return "Invalid date";
   const now = new Date();
   const diffInMins = Math.floor((now - date) / (1000 * 60));
-  
   if (diffInMins < 1) return "Just now";
   if (diffInMins < 60) return `${diffInMins}m ago`;
   const diffInHours = Math.floor(diffInMins / 60);
@@ -22,14 +20,11 @@ const formatLastActive = (dateString) => {
   return date.toLocaleDateString();
 };
 
-// ✅ التعديل الأساسي: بنطابق القيم الفعلية من السيرفر بالظبط
 const getStatusStyle = (status = '') => {
   const s = String(status || '').trim();
-
-  if (s === 'Available')  return 'bg-emerald-50 text-emerald-600 border-emerald-100';
-  if (s === 'Busy')       return 'bg-rose-50 text-rose-600 border-rose-100';
-  if (s === 'EnRoute')    return 'bg-blue-50 text-blue-600 border-blue-100';
-
+  if (s === 'Available') return 'bg-emerald-50 text-emerald-600 border-emerald-100';
+  if (s === 'Busy')      return 'bg-rose-50 text-rose-600 border-rose-100';
+  if (s === 'EnRoute')   return 'bg-blue-50 text-blue-600 border-blue-100';
   return 'bg-slate-50 text-slate-500 border-slate-200';
 };
 
@@ -39,15 +34,79 @@ const NavItem = ({ icon, label, active = false, onClick }) => (
   </div>
 );
 
-const EmergencyUnits = ({ units = [], onDelete, admin }) => {
+const EmergencyUnits = ({ onDelete, admin }) => {
   const navigate = useNavigate();
-  const location = useLocation();
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm]     = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const firstName = admin?.firstName || localStorage.getItem('adminName') || 'Admin';
-  const lastName = admin?.lastName || '';
-  const userEmail = admin?.email || localStorage.getItem('adminEmail') || 'admin@system.com';
-  const initials = (firstName.charAt(0) + (lastName ? lastName.charAt(0) : '')).toUpperCase();
+  // ✅ ابدأ من الكاش فوراً
+  const [units, setUnits] = useState(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem('unitsCache') || '[]');
+      return Array.isArray(cached) ? cached : [];
+    } catch { return []; }
+  });
+
+  // ✅ جيب البيانات من الـ API مباشرة
+  const loadUnits = useCallback(async () => {
+    const token = localStorage.getItem('adminToken');
+    if (!token) return;
+    try {
+      const response = await axios.get('/api/admin/response-units/List', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+        params: { _t: Date.now() },
+      });
+      const data = response.data;
+      const candidates = [
+        data, data?.data, data?.data?.data, data?.data?.items,
+        data?.result, data?.items, data?.responseUnits,
+        data?.responseUnits?.data, data?.data?.responseUnits,
+      ];
+      const isUnits = (arr) => {
+        if (!Array.isArray(arr) || arr.length === 0) return false;
+        const s = arr.find(x => x && typeof x === 'object');
+        return s && ('name' in s || 'id' in s || 'unitId' in s);
+      };
+      const normalized = candidates.find(isUnits) || [];
+      if (normalized.length > 0) {
+        setUnits(normalized);
+        localStorage.setItem('unitsCache', JSON.stringify(normalized));
+        window.dispatchEvent(new CustomEvent('unitsUpdated', { detail: normalized }));
+      }
+    } catch (err) {
+      console.error('EmergencyUnits loadUnits error:', err);
+    }
+  }, []);
+
+  // ✅ اشتغل كل مرة الصفحة تتفتح
+  useEffect(() => {
+    loadUnits();
+  }, [loadUnits]);
+
+  // ✅ استمع للـ event من أي صفحة تانية
+  useEffect(() => {
+    const handler = (e) => {
+      if (Array.isArray(e.detail) && e.detail.length > 0) setUnits(e.detail);
+    };
+    window.addEventListener('unitsUpdated', handler);
+    return () => window.removeEventListener('unitsUpdated', handler);
+  }, []);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await loadUnits();
+    setIsRefreshing(false);
+  };
+
+  // ── Admin info ──────────────────────────────────────────────────────────────
+  const firstName  = admin?.firstName || localStorage.getItem('adminFirstName') || localStorage.getItem('adminName') || 'Admin';
+  const lastName   = admin?.lastName  || localStorage.getItem('adminLastName')  || '';
+  const userEmail  = admin?.email     || localStorage.getItem('adminEmail')     || 'admin@system.com';
+  const initials   = (firstName.charAt(0) + (lastName ? lastName.charAt(0) : '')).toUpperCase();
 
   const getUnitIcon = (type = '') => {
     const t = String(type || '').toLowerCase();
@@ -70,6 +129,9 @@ const EmergencyUnits = ({ units = [], onDelete, admin }) => {
       if (result.isConfirmed) {
         try {
           await onDelete(unit.id);
+          // بعد الحذف، حدّث القائمة المحلية وأعد الجلب
+          setUnits(prev => prev.filter(u => u.id !== unit.id));
+          await loadUnits();
           Swal.fire({ title: 'Deleted!', icon: 'success', timer: 1000, showConfirmButton: false });
         } catch (error) {
           Swal.fire('Error', 'Failed to delete unit', 'error');
@@ -78,13 +140,15 @@ const EmergencyUnits = ({ units = [], onDelete, admin }) => {
     });
   };
 
-  const filteredUnits = units.filter(unit => 
-    (unit.name || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
+  const filteredUnits = units.filter(unit =>
+    (unit.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
     String(unit.id || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   return (
     <div className="flex min-h-screen bg-[#f8f9fc]">
+
+      {/* SIDEBAR */}
       <aside className="w-64 bg-[#0f172a] text-white flex flex-col fixed h-full z-20 shadow-xl">
         <div className="p-6 flex items-center space-x-3 border-b border-slate-800/50 cursor-pointer" onClick={() => navigate('/dashboard')}>
           <div className="bg-blue-600 p-1.5 rounded-lg shadow-lg"><LayoutGrid size={20} /></div>
@@ -92,21 +156,22 @@ const EmergencyUnits = ({ units = [], onDelete, admin }) => {
         </div>
         <nav className="flex-1 px-4 space-y-2 mt-6 text-left">
           <NavItem icon={<LayoutGrid size={20} />} label="Dashboard"        onClick={() => navigate('/dashboard')} />
-          <NavItem icon={<Truck size={20} />}       label="Emergency Units"  active={true} onClick={() => navigate('/units')} />
+          <NavItem icon={<Truck size={20} />}       label="Emergency Units"  active onClick={() => navigate('/units')} />
           <NavItem icon={<Users size={20} />}       label="Admin Management" onClick={() => navigate('/admin-management')} />
           <NavItem icon={<Settings size={20} />}    label="System Settings"  onClick={() => navigate('/settings')} />
         </nav>
         <div className="p-4 border-t border-slate-800">
-           <div className="flex items-center space-x-3 p-3 rounded-xl bg-slate-800/40 border border-slate-700/50">
-              <div className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center text-[11px] font-bold uppercase">{initials}</div>
-              <div className="text-left overflow-hidden">
-                <p className="text-[12px] font-bold text-white truncate">{firstName}</p>
-                <p className="text-[10px] text-slate-500 truncate">{userEmail}</p>
-              </div>
-           </div>
+          <div className="flex items-center space-x-3 p-3 rounded-xl bg-slate-800/40 border border-slate-700/50">
+            <div className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center text-[11px] font-bold uppercase">{initials}</div>
+            <div className="text-left overflow-hidden">
+              <p className="text-[12px] font-bold text-white truncate">{firstName} {lastName}</p>
+              <p className="text-[10px] text-slate-500 truncate">{userEmail}</p>
+            </div>
+          </div>
         </div>
       </aside>
 
+      {/* MAIN */}
       <main className="flex-1 ml-64 p-8 text-left">
         <header className="flex justify-between items-center mb-10">
           <div>
@@ -114,21 +179,19 @@ const EmergencyUnits = ({ units = [], onDelete, admin }) => {
             <p className="text-slate-500 text-sm">Managing all active response assets</p>
           </div>
           <div className="flex items-center space-x-4">
-             <div className="flex space-x-3 text-slate-400 border-r pr-4">
-                <Bell size={19} className="cursor-pointer hover:text-blue-600" />
-                <Mail size={19} className="cursor-pointer hover:text-blue-600" />
-                <Moon size={19} className="cursor-pointer hover:text-blue-600" />
-             </div>
-             <div className="flex items-center space-x-3 pl-2 cursor-pointer hover:opacity-80 transition-all" onClick={() => navigate('/profile')}>
-                <div className="text-right">
-                    <p className="text-sm font-bold text-slate-800 leading-none">{firstName} {lastName}</p>
-                    <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">Administrator</p>
-                </div>
-                <div className="w-9 h-9 rounded-full bg-slate-200 flex items-center justify-center text-blue-600 font-bold border border-slate-100 uppercase text-xs">
-                  {initials}
-                </div>
-                <ChevronDown size={14} className="text-slate-300" />
-             </div>
+            <div className="flex space-x-3 text-slate-400 border-r pr-4">
+              <Bell size={19} className="cursor-pointer hover:text-blue-600" />
+              <Mail size={19} className="cursor-pointer hover:text-blue-600" />
+              <Moon size={19} className="cursor-pointer hover:text-blue-600" />
+            </div>
+            <div className="flex items-center space-x-3 pl-2 cursor-pointer hover:opacity-80 transition-all" onClick={() => navigate('/profile')}>
+              <div className="text-right">
+                <p className="text-sm font-bold text-slate-800 leading-none">{firstName} {lastName}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">Administrator</p>
+              </div>
+              <div className="w-9 h-9 rounded-full bg-slate-200 flex items-center justify-center text-blue-600 font-bold border border-slate-100 uppercase text-xs">{initials}</div>
+              <ChevronDown size={14} className="text-slate-300" />
+            </div>
           </div>
         </header>
 
@@ -136,17 +199,31 @@ const EmergencyUnits = ({ units = [], onDelete, admin }) => {
           <div className="flex justify-between items-center mb-8 gap-4">
             <div className="relative flex-1 max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-              <input 
-                type="text" 
-                placeholder="Search by name or ID..." 
+              <input
+                type="text"
+                placeholder="Search by name or ID..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-100 rounded-xl text-sm focus:outline-none focus:border-blue-500" 
+                className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-100 rounded-xl text-sm focus:outline-none focus:border-blue-500"
               />
             </div>
-            <button onClick={() => navigate('/add-unit')} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-xl flex items-center space-x-2 text-sm font-bold shadow-lg shadow-blue-200 transition-all active:scale-95">
-              <Plus size={18} /><span>Add New Unit</span>
-            </button>
+            <div className="flex items-center space-x-2">
+              {/* ✅ زرار Refresh */}
+              <button
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                className="flex items-center space-x-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-slate-500 hover:text-blue-600 hover:border-blue-200 transition-all text-sm font-bold shadow-sm disabled:opacity-50"
+              >
+                <RefreshCw size={15} className={isRefreshing ? 'animate-spin text-blue-500' : ''} />
+                <span>{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
+              </button>
+              <button
+                onClick={() => navigate('/add-unit')}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-xl flex items-center space-x-2 text-sm font-bold shadow-lg shadow-blue-200 transition-all active:scale-95"
+              >
+                <Plus size={18} /><span>Add New Unit</span>
+              </button>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -182,25 +259,29 @@ const EmergencyUnits = ({ units = [], onDelete, admin }) => {
                       {formatLastActive(unit.createdAt)}
                     </td>
                     <td className="py-5 px-4 text-right">
-                        <div className="flex items-center justify-end space-x-4 text-slate-300">
-                          <Eye size={18} className="cursor-pointer hover:text-blue-600 transition-colors" />
-                          <Pencil 
-                            size={18} 
-                            className="cursor-pointer hover:text-amber-500 transition-colors" 
-                            onClick={() => navigate('/add-unit', { state: { unit } })} 
-                          />
-                          <Trash2 
-                            size={18} 
-                            className="cursor-pointer hover:text-rose-500 transition-colors" 
-                            onClick={() => confirmDelete(unit)}
-                          />
-                        </div>
+                      <div className="flex items-center justify-end space-x-4 text-slate-300">
+                        <Eye size={18} className="cursor-pointer hover:text-blue-600 transition-colors" />
+                        <Pencil
+                          size={18}
+                          className="cursor-pointer hover:text-amber-500 transition-colors"
+                          onClick={() => navigate('/add-unit', { state: { unit } })}
+                        />
+                        <Trash2
+                          size={18}
+                          className="cursor-pointer hover:text-rose-500 transition-colors"
+                          onClick={() => confirmDelete(unit)}
+                        />
+                      </div>
                     </td>
                   </tr>
                 )) : (
                   <tr>
-                    <td colSpan="4" className="py-10 text-center text-slate-400 text-sm italic">
-                      No units found in the system.
+                    <td colSpan="4" className="py-16 text-center">
+                      <div className="flex flex-col items-center space-y-2">
+                        <Truck size={32} className="text-slate-200" />
+                        <p className="text-slate-400 text-sm font-bold">No units found</p>
+                        <p className="text-slate-300 text-xs">Try clicking Refresh or add a new unit</p>
+                      </div>
                     </td>
                   </tr>
                 )}
