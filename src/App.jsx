@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import Swal from 'sweetalert2';
@@ -60,6 +60,7 @@ function App() {
     sessions: [{ id: 1, device: 'Windows PC - Chrome', location: 'Egypt', time: 'Active Now', current: true }],
   });
 
+  // ✅ FIX 1: ابدأ بالكاش فوراً بدل ما تمسحه
   const [units, setUnits] = useState(() => {
     try {
       const cached = JSON.parse(localStorage.getItem('unitsCache') || '[]');
@@ -97,36 +98,88 @@ function App() {
     return [];
   };
 
-  const fetchUnits = async () => {
+  // ✅ FIX 2: fetchUnits محسّنة - بتحافظ على الكاش وبتبعت event لما البيانات تيجي
+  const fetchUnits = useCallback(async () => {
     const token = localStorage.getItem('adminToken');
     const isUnitPath = window.location.pathname.startsWith('/unit') || window.location.pathname.startsWith('/bin');
     if (!token || isUnitPath) { setLoadingUnits(false); return; }
-    const cachedUnits = (() => { try { const c = JSON.parse(localStorage.getItem('unitsCache') || '[]'); return Array.isArray(c) ? c : []; } catch { return []; } })();
-    localStorage.removeItem('unitsCache');
+
+    // ✅ خلي الكاش موجود (متمسحوش) عشان الداشبورد يتعرض بداتا قديمة أفضل من صفار
+    const cachedUnits = (() => {
+      try { const c = JSON.parse(localStorage.getItem('unitsCache') || '[]'); return Array.isArray(c) ? c : []; }
+      catch { return []; }
+    })();
+
     try {
       setLoadingUnits(true);
       for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt > 0) await new Promise((r) => setTimeout(r, 800));
         const response = await axios.get('/api/admin/response-units/List', {
-          headers: { Authorization: `Bearer ${token}`, Accept: '*/*', 'Cache-Control': 'no-cache, no-store, must-revalidate', Pragma: 'no-cache' },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: '*/*',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            Pragma: 'no-cache',
+          },
           params: { _t: Date.now() },
         });
         const normalized = normalizeUnitsResponse(response.data);
-        if (Array.isArray(normalized) && normalized.length > 0) { setUnits(normalized); localStorage.setItem('unitsCache', JSON.stringify(normalized)); return; }
-        if (attempt === 1) { setUnits([]); localStorage.setItem('unitsCache', JSON.stringify([])); }
+        if (Array.isArray(normalized) && normalized.length > 0) {
+          setUnits(normalized);
+          localStorage.setItem('unitsCache', JSON.stringify(normalized));
+          // ✅ FIX 3: ابعت event عشان أي component تاني يعرف إن البيانات اتحدثت
+          window.dispatchEvent(new CustomEvent('unitsUpdated', { detail: normalized }));
+          return;
+        }
+        if (attempt === 1 && normalized.length === 0) {
+          // لو الـ API رجع بيانات فاضية فعلاً، اعرض الكاش القديم لو موجود
+          if (cachedUnits.length > 0) {
+            setUnits(cachedUnits);
+          } else {
+            setUnits([]);
+            localStorage.setItem('unitsCache', JSON.stringify([]));
+          }
+        }
       }
     } catch (error) {
       console.error('FetchUnits Error:', error);
-      if (cachedUnits.length > 0) setUnits(cachedUnits);
-    } finally { setLoadingUnits(false); }
-  };
+      // لو فيه error، استخدم الكاش القديم
+      if (cachedUnits.length > 0) {
+        setUnits(cachedUnits);
+      }
+    } finally {
+      setLoadingUnits(false);
+    }
+  }, []);
 
+  // ✅ FIX 4: استمع للـ visibility change عشان لما اليوزر يرجع للتاب يعمل refresh
   useEffect(() => {
     const isUnitLogin = window.location.pathname === '/unit/login';
     const isBinLogin = window.location.pathname === '/bin/login'; 
     const isMainLogin = window.location.pathname === '/';
-    if (!isUnitLogin && !isBinLogin && !isMainLogin) fetchUnits(); 
-  }, []);
+    if (!isUnitLogin && !isBinLogin && !isMainLogin) fetchUnits();
+
+    // ✅ لما اليوزر يرجع للتاب بعد ما يكون مشي، اعمل refresh للبيانات
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const token = localStorage.getItem('adminToken');
+        if (token) fetchUnits();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // ✅ Auto-refresh كل 30 ثانية لو الـ admin مسجل دخول
+    const autoRefreshInterval = setInterval(() => {
+      const token = localStorage.getItem('adminToken');
+      const isOnAdminPage = !window.location.pathname.startsWith('/unit') && !window.location.pathname.startsWith('/bin');
+      if (token && isOnAdminPage) fetchUnits();
+    }, 30000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearInterval(autoRefreshInterval);
+    };
+  }, [fetchUnits]);
 
   const updateAdmin = (newData) => {
     setAdminUser((prev) => {
@@ -166,7 +219,7 @@ function App() {
         {/* Admin */}
 <Route path="/" element={<SmartLogin />} />
         <Route path="/create-account" element={<CreateAccount />} />
-        <Route path="/dashboard" element={<Dashboard units={units} admin={adminUser} />} />
+        <Route path="/dashboard" element={<Dashboard units={units} admin={adminUser} onRefresh={fetchUnits} />} />
         <Route path="/units" element={<EmergencyUnits units={units} onDelete={deleteUnit} admin={adminUser} />} />
         <Route path="/add-unit" element={<AddUnit onAdd={fetchUnits} admin={adminUser} />} />
         <Route path="/admin-management" element={<AdminManagement admin={adminUser} />} />

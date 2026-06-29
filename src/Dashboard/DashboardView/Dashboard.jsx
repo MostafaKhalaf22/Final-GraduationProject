@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import { 
   LayoutGrid, Truck, Activity, Map as MapIcon, 
-  Users, Settings, Bell, Mail, LogOut, ChevronDown, Filter
+  Users, Settings, Bell, Mail, LogOut, ChevronDown, Filter, RefreshCw
 } from 'lucide-react';
 
 const NavItem = ({ icon, label, active = false, onClick }) => (
@@ -47,18 +48,6 @@ const StatCard = ({ title, value, trend, icon, color }) => {
   );
 };
 
-const NotifyItem = ({ title, desc, colorClass }) => (
-  <div className="flex items-start space-x-3 group cursor-pointer text-left">
-    <div className={`w-1 self-stretch rounded-full ${colorClass}`}></div>
-    <div className="flex-1">
-      <h4 className="text-sm font-bold text-slate-800 group-hover:text-blue-600 transition-colors">
-        {title}
-      </h4>
-      <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">{desc}</p>
-    </div>
-  </div>
-);
-
 // ── Live clock hook ───────────────────────────────────────────────────────────
 function useLiveClock() {
   const [now, setNow] = useState(new Date());
@@ -69,12 +58,82 @@ function useLiveClock() {
   return now;
 }
 
-const Dashboard = ({ units = [], admin }) => {
-  const navigate   = useNavigate();
-  const now        = useLiveClock();
-  const [filterStatus, setFilterStatus] = useState('All');
+// ── الداشبورد يجيب البيانات بنفسه عند كل mount ───────────────────────────────
+const Dashboard = ({ admin, onRefresh }) => {
+  const navigate = useNavigate();
+  const now      = useLiveClock();
+  const [filterStatus, setFilterStatus]   = useState('All');
+  const [isRefreshing, setIsRefreshing]   = useState(false);
 
-  // ── Admin info — نفس pattern الداشبورد الوحدات ─────────────────────────────
+  // ✅ البيانات تبدأ من الكاش فوراً (عشان مفيش وميض)
+  const [units, setUnits] = useState(() => {
+    try {
+      const cached = JSON.parse(localStorage.getItem('unitsCache') || '[]');
+      return Array.isArray(cached) ? cached : [];
+    } catch { return []; }
+  });
+
+  // ✅ جيب البيانات مباشرة من الـ API
+  const loadUnits = useCallback(async () => {
+    const token = localStorage.getItem('adminToken');
+    if (!token) return;
+    try {
+      const response = await axios.get('/api/admin/response-units/List', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+        params: { _t: Date.now() },
+      });
+
+      // استخرج الـ array من أي شكل يجي فيه الـ response
+      const data = response.data;
+      const candidates = [
+        data, data?.data, data?.data?.data, data?.data?.items,
+        data?.result, data?.items, data?.responseUnits,
+        data?.responseUnits?.data, data?.data?.responseUnits,
+      ];
+      const isUnits = (arr) => {
+        if (!Array.isArray(arr) || arr.length === 0) return false;
+        const s = arr.find(x => x && typeof x === 'object');
+        return s && ('name' in s || 'id' in s || 'unitId' in s);
+      };
+      const normalized = candidates.find(isUnits) || [];
+
+      if (normalized.length > 0) {
+        setUnits(normalized);
+        localStorage.setItem('unitsCache', JSON.stringify(normalized));
+      }
+    } catch (err) {
+      console.error('Dashboard loadUnits error:', err);
+      // لو فشل، خلي الكاش اللي عنده
+    }
+  }, []);
+
+  // ✅ اشتغل كل مرة الداشبورد يتعرض (mount)
+  useEffect(() => {
+    loadUnits();
+  }, [loadUnits]);
+
+  // ✅ استمع كمان للـ event اللي بييجي من App.jsx
+  useEffect(() => {
+    const handler = (e) => {
+      if (Array.isArray(e.detail) && e.detail.length > 0) setUnits(e.detail);
+    };
+    window.addEventListener('unitsUpdated', handler);
+    return () => window.removeEventListener('unitsUpdated', handler);
+  }, []);
+
+  // ── زرار Refresh يدوي ────────────────────────────────────────────────────
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await loadUnits();
+    if (onRefresh) await onRefresh();
+    setIsRefreshing(false);
+  };
+
+  // ── Admin info ─────────────────────────────────────────────────────────────
   const [adminInfo, setAdminInfo] = useState({
     firstName: localStorage.getItem('adminFirstName') || admin?.firstName || 'Admin',
     lastName:  localStorage.getItem('adminLastName')  || admin?.lastName  || '',
@@ -82,18 +141,15 @@ const Dashboard = ({ units = [], admin }) => {
     role:      admin?.role || 'System Administrator',
   });
 
-  // ✅ يستمع لأي تحديث في الـ profile
   useEffect(() => {
-    const handleProfileUpdate = () => {
-      setAdminInfo({
-        firstName: localStorage.getItem('adminFirstName') || 'Admin',
-        lastName:  localStorage.getItem('adminLastName')  || '',
-        email:     localStorage.getItem('adminEmail')     || 'admin@system.com',
-        role:      admin?.role || 'System Administrator',
-      });
-    };
-    window.addEventListener('profileUpdate', handleProfileUpdate);
-    return () => window.removeEventListener('profileUpdate', handleProfileUpdate);
+    const sync = () => setAdminInfo({
+      firstName: localStorage.getItem('adminFirstName') || 'Admin',
+      lastName:  localStorage.getItem('adminLastName')  || '',
+      email:     localStorage.getItem('adminEmail')     || 'admin@system.com',
+      role:      admin?.role || 'System Administrator',
+    });
+    window.addEventListener('profileUpdate', sync);
+    return () => window.removeEventListener('profileUpdate', sync);
   }, [admin?.role]);
 
   const fullName = `${adminInfo.firstName} ${adminInfo.lastName}`.trim();
@@ -114,16 +170,12 @@ const Dashboard = ({ units = [], admin }) => {
     enRouteUnits:   units.filter((u) => u.status === 'EnRoute').length,
   };
 
-  // ── Status badge helper ───────────────────────────────────────────────────
   const statusBadge = (status) => {
-    if (status === 'Available')
-      return 'bg-emerald-50 text-emerald-600 border-emerald-100';
-    if (status === 'Busy')
-      return 'bg-rose-50 text-rose-600 border-rose-100';
+    if (status === 'Available') return 'bg-emerald-50 text-emerald-600 border-emerald-100';
+    if (status === 'Busy')      return 'bg-rose-50 text-rose-600 border-rose-100';
     return 'bg-blue-50 text-blue-600 border-blue-100';
   };
 
-  // ── Logout ────────────────────────────────────────────────────────────────
   const handleLogout = (e) => {
     e.stopPropagation();
     localStorage.clear();
@@ -132,29 +184,14 @@ const Dashboard = ({ units = [], admin }) => {
     window.location.reload();
   };
 
-  // ── Formatted clock strings ───────────────────────────────────────────────
-  const timeStr = now.toLocaleTimeString('en-US', {
-    hour:   '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-  const dateStr = now.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month:   'short',
-    day:     'numeric',
-    year:    'numeric',
-  });
+  const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const dateStr = now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 
-  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="flex min-h-screen bg-[#f8f9fc]">
 
-      {/* ═══════════════════════════════════════════════════════
-          SIDEBAR
-      ═══════════════════════════════════════════════════════ */}
+      {/* SIDEBAR */}
       <aside className="w-64 bg-[#0f172a] text-white flex flex-col fixed h-full z-20 shadow-xl">
-
-        {/* Logo */}
         <div className="p-6 flex items-center space-x-3 border-b border-slate-800/50">
           <div className="bg-blue-600 p-1.5 rounded-lg shadow-lg shadow-blue-500/20">
             <LayoutGrid size={20} />
@@ -162,7 +199,6 @@ const Dashboard = ({ units = [], admin }) => {
           <span className="text-xl font-bold tracking-tight">Admin Portal</span>
         </div>
 
-        {/* Nav links */}
         <nav className="flex-1 px-4 space-y-2 mt-6 text-left">
           <NavItem icon={<LayoutGrid size={20} />} label="Dashboard"        active onClick={() => navigate('/dashboard')} />
           <NavItem icon={<Truck size={20} />}       label="Emergency Units"  onClick={() => navigate('/units')} />
@@ -170,113 +206,83 @@ const Dashboard = ({ units = [], admin }) => {
           <NavItem icon={<Settings size={20} />}    label="System Settings"  onClick={() => navigate('/settings')} />
         </nav>
 
-        {/* ✅ Live clock in sidebar footer */}
         <div className="px-4 py-3 border-t border-slate-800/50">
           <p className="text-[10px] font-mono text-slate-600 text-center tracking-tight">
             {timeStr} · {dateStr}
           </p>
         </div>
 
-        {/* Admin profile row */}
         <div className="p-4 border-t border-slate-800 bg-[#0F172A]">
           <div
             className="flex items-center justify-between p-3 rounded-xl bg-slate-800/40 border border-slate-700/50 hover:bg-slate-800 cursor-pointer transition-all group"
             onClick={() => navigate('/profile')}
           >
             <div className="flex items-center space-x-3 overflow-hidden">
-              {/* Avatar */}
               <div className="w-10 h-10 rounded-full bg-blue-600 border-2 border-blue-400/30 flex items-center justify-center text-white font-bold text-xs shadow-lg uppercase flex-shrink-0">
                 {initials}
               </div>
               <div className="text-left truncate">
-                <p className="text-[12px] font-bold text-white truncate tracking-tight">
-                  {fullName}
-                </p>
-                <p className="text-[10px] text-slate-400 truncate mt-0.5 font-medium group-hover:text-blue-400 transition-colors">
-                  {adminInfo.email}
-                </p>
+                <p className="text-[12px] font-bold text-white truncate tracking-tight">{fullName}</p>
+                <p className="text-[10px] text-slate-400 truncate mt-0.5 font-medium group-hover:text-blue-400 transition-colors">{adminInfo.email}</p>
               </div>
             </div>
-            {/* Logout icon */}
-            <LogOut
-              size={16}
-              className="text-slate-500 group-hover:text-red-400 transition-colors ml-1 flex-shrink-0"
-              onClick={handleLogout}
-            />
+            <LogOut size={16} className="text-slate-500 group-hover:text-red-400 transition-colors ml-1 flex-shrink-0" onClick={handleLogout} />
           </div>
         </div>
       </aside>
 
-      {/* ═══════════════════════════════════════════════════════
-          MAIN
-      ═══════════════════════════════════════════════════════ */}
+      {/* MAIN */}
       <main className="flex-1 ml-64 p-8 text-left">
 
-        {/* Top header bar */}
         <header className="flex justify-between items-center mb-10">
           <div>
             <h1 className="text-2xl font-bold text-slate-800 tracking-tight">Dashboard Overview</h1>
             <p className="text-slate-500 text-sm mt-0.5">
-              Welcome back,{' '}
-              <span className="text-blue-600 font-semibold">{adminInfo.firstName}</span>
+              Welcome back, <span className="text-blue-600 font-semibold">{adminInfo.firstName}</span>
             </p>
           </div>
 
-          {/* ✅ Top-right profile pill — live name + role */}
-          <div
-            onClick={() => navigate('/profile')}
-            className="flex items-center space-x-6 bg-white p-2 px-4 rounded-2xl border border-slate-100 shadow-sm cursor-pointer hover:bg-slate-50 transition-all"
-          >
-            <div className="flex space-x-5 text-slate-400 border-r border-slate-100 pr-5">
-              <Bell size={19} className="hover:text-blue-600 transition-colors" />
-              <Mail size={19} className="hover:text-blue-600 transition-colors" />
-            </div>
-            <div className="flex items-center space-x-3 pl-2 text-left">
-              <div className="text-right">
-                <p className="text-sm font-bold text-slate-800 leading-none">{fullName}</p>
-                <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">{adminInfo.role}</p>
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="flex items-center space-x-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-slate-500 hover:text-blue-600 hover:border-blue-200 hover:shadow-sm transition-all text-xs font-bold shadow-sm disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={isRefreshing ? 'animate-spin text-blue-500' : ''} />
+              <span>{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
+            </button>
+
+            <div
+              onClick={() => navigate('/profile')}
+              className="flex items-center space-x-6 bg-white p-2 px-4 rounded-2xl border border-slate-100 shadow-sm cursor-pointer hover:bg-slate-50 transition-all"
+            >
+              <div className="flex space-x-5 text-slate-400 border-r border-slate-100 pr-5">
+                <Bell size={19} className="hover:text-blue-600 transition-colors" />
+                <Mail size={19} className="hover:text-blue-600 transition-colors" />
               </div>
-              <div className="w-9 h-9 rounded-full bg-blue-50 flex items-center justify-center text-blue-600 font-bold border border-blue-100 uppercase text-xs">
-                {initials}
+              <div className="flex items-center space-x-3 pl-2 text-left">
+                <div className="text-right">
+                  <p className="text-sm font-bold text-slate-800 leading-none">{fullName}</p>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">{adminInfo.role}</p>
+                </div>
+                <div className="w-9 h-9 rounded-full bg-blue-50 flex items-center justify-center text-blue-600 font-bold border border-blue-100 uppercase text-xs">
+                  {initials}
+                </div>
+                <ChevronDown size={14} className="text-slate-300" />
               </div>
-              <ChevronDown size={14} className="text-slate-300" />
             </div>
           </div>
         </header>
 
-        {/* ── Stat cards ──────────────────────────────────────── */}
+        {/* Stat cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <StatCard
-            title="Total Assets"
-            value={stats.totalUnits}
-            trend="All registered units"
-            icon={<Truck size={22} />}
-            color="blue"
-          />
-          <StatCard
-            title="Available Now"
-            value={stats.availableUnits}
-            trend={`${stats.availableUnits} units ready`}
-            icon={<Activity size={22} />}
-            color="indigo"
-          />
-          <StatCard
-            title="Busy"
-            value={stats.busyUnits}
-            trend={stats.busyUnits > 0 ? `${stats.busyUnits} units on call` : 'All clear'}
-            icon={<Bell size={22} />}
-            color="rose"
-          />
-          <StatCard
-            title="En Route"
-            value={stats.enRouteUnits}
-            trend={stats.enRouteUnits > 0 ? `${stats.enRouteUnits} units dispatched` : 'None dispatched'}
-            icon={<MapIcon size={22} />}
-            color="emerald"
-          />
+          <StatCard title="Total Assets"   value={stats.totalUnits}     trend="All registered units"                                                          icon={<Truck size={22} />}    color="blue" />
+          <StatCard title="Available Now"  value={stats.availableUnits}  trend={`${stats.availableUnits} units ready`}                                          icon={<Activity size={22} />} color="indigo" />
+          <StatCard title="Busy"           value={stats.busyUnits}       trend={stats.busyUnits > 0 ? `${stats.busyUnits} units on call` : 'All clear'}         icon={<Bell size={22} />}     color="rose" />
+          <StatCard title="En Route"       value={stats.enRouteUnits}    trend={stats.enRouteUnits > 0 ? `${stats.enRouteUnits} units dispatched` : 'None dispatched'} icon={<MapIcon size={22} />}  color="emerald" />
         </div>
 
-        {/* ── Units table ──────────────────────────────────────── */}
+        {/* Units table */}
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mb-8">
           <div className="p-6 border-b border-slate-50 flex justify-between items-center text-left">
             <div>
@@ -302,13 +308,12 @@ const Dashboard = ({ units = [], admin }) => {
 
           <div className="overflow-x-auto">
             {filteredUnits.length === 0 ? (
-              /* ✅ Empty state */
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="bg-slate-50 p-5 rounded-2xl mb-4">
                   <Truck size={32} className="text-slate-200 mx-auto" />
                 </div>
-                <p className="text-slate-400 text-sm font-bold">No units match this filter</p>
-                <p className="text-slate-300 text-xs mt-1">Try selecting a different status</p>
+                <p className="text-slate-400 text-sm font-bold">No units found</p>
+                <p className="text-slate-300 text-xs mt-1">Try clicking Refresh or selecting a different status</p>
               </div>
             ) : (
               <table className="w-full text-left">
@@ -334,10 +339,7 @@ const Dashboard = ({ units = [], admin }) => {
                         </span>
                       </td>
                       <td className="px-6 py-4">
-                        <button
-                          onClick={() => navigate('/units')}
-                          className="text-blue-600 text-xs font-bold hover:underline"
-                        >
+                        <button onClick={() => navigate('/units')} className="text-blue-600 text-xs font-bold hover:underline">
                           View Details
                         </button>
                       </td>
